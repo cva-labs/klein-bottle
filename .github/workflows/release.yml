@@ -50,14 +50,15 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item "build/KleinBottle_artefacts/Release/VST3/Klein Bottle Experimental.vst3" dist -Recurse
+          Copy-Item "build/KleinBottle_artefacts/Release/VST3/Klein Bottle Experimental.vst3" dist -Recurse -Force
           Copy-Item "build/KleinBottle_artefacts/Release/Standalone/Klein Bottle Experimental.exe" dist
           Compress-Archive -Path dist/* -DestinationPath "${{ matrix.artifact }}.zip" -Force
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: |
-          mkdir dist
+          mkdir -p dist
+          rm -rf dist/*
           cp -R "build/KleinBottle_artefacts/Release/VST3/Klein Bottle Experimental.vst3" dist/
           cp -R "build/KleinBottle_artefacts/Release/Standalone/Klein Bottle Experimental.app" dist/
           chmod +x "dist/Klein Bottle Experimental.app/Contents/MacOS/"*

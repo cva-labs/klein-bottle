@@ -6,3 +6,7 @@ out/
 *.user
 CMakeSettings.json
 *.log
+dist/
+*.zip
+push.err
+release-notes.md
