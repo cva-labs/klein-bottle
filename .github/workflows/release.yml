@@ -59,8 +59,12 @@ jobs:
         run: |
           mkdir -p dist
           rm -rf dist/*
-          cp -R "build/KleinBottle_artefacts/Release/VST3/Klein Bottle Experimental.vst3" dist/
-          cp -R "build/KleinBottle_artefacts/Release/Standalone/Klein Bottle Experimental.app" dist/
+          vst3=$(find build -type d -name "*.vst3" | head -n 1)
+          app=$(find build -type d -name "Klein Bottle Experimental.app" | head -n 1)
+          echo "vst3=$vst3"
+          echo "app=$app"
+          cp -R "$vst3" dist/
+          cp -R "$app" dist/
           chmod +x "dist/Klein Bottle Experimental.app/Contents/MacOS/"*
           zip -qry "${{ matrix.artifact }}.zip" dist
 
