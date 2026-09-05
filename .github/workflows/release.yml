@@ -30,7 +30,7 @@ jobs:
 
       - name: Configure (Windows)
         if: runner.os == 'Windows'
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DJUCE_PATH="${{ github.workspace }}/../JUCE"
+        run: cmake -S . -B build -DJUCE_PATH="${{ github.workspace }}/../JUCE"
 
       - name: Build (Windows)
         if: runner.os == 'Windows'
