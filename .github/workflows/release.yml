@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags: [ "v*" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: Windows x64
+            artifact: Klein-Bottle-Experimental-Windows-x64
+          - os: macos-latest
+            name: macOS universal
+            artifact: Klein-Bottle-Experimental-macOS
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch JUCE 8.0.12
+        run: git clone --depth 1 --branch 8.0.12 https://github.com/juce-framework/JUCE.git "${{ github.workspace }}/../JUCE"
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DJUCE_PATH="${{ github.workspace }}/../JUCE"
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: cmake --build build --config Release --parallel
+
+      - name: Configure & build (macOS, universal)
+        if: runner.os == 'macOS'
+        run: |
+          cmake -S . -B build -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DJUCE_PATH="${{ github.workspace }}/../JUCE"
+          cmake --build build --config Release --parallel
+
+      - name: Run DSP tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item "build/KleinBottle_artefacts/Release/VST3/Klein Bottle Experimental.vst3" dist -Recurse
+          Copy-Item "build/KleinBottle_artefacts/Release/Standalone/Klein Bottle Experimental.exe" dist
+          Compress-Archive -Path dist/* -DestinationPath "${{ matrix.artifact }}.zip" -Force
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir dist
+          cp -R "build/KleinBottle_artefacts/Release/VST3/Klein Bottle Experimental.vst3" dist/
+          cp -R "build/KleinBottle_artefacts/Release/Standalone/Klein Bottle Experimental.app" dist/
+          chmod +x "dist/Klein Bottle Experimental.app/Contents/MacOS/"*
+          zip -qry "${{ matrix.artifact }}.zip" dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      - name: Attach zips to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "Klein Bottle Experimental $TAG" \
+               --notes "VST3 + Standalone builds. See README for installation."
+          gh release upload "$TAG" dist/*.zip --clobber
