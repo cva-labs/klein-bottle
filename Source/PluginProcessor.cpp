@@ -73,7 +73,18 @@ void KleinBottleAudioProcessor::prepareToPlay (double sampleRate, int /*samplesP
     {
         v.active = false;
         v.mesh.setSampleRate (fs);
+        // Worst case across all quality settings / body-shape values (nxMax
+        // 144 @ high quality, shape up to 1.0 -> ny can equal nx): reserving
+        // it up front means resize() below never reallocates on the audio
+        // thread when a note-on picks a different grid size (e.g. rapid
+        // voice-stealing during a fast glissando).
+        v.mesh.reserveMax (144, 144);
         v.mesh.clear();
+        // Pre-reserve the per-voice fold-down scratch so hosts that chop audio
+        // into varying block sizes never trigger a vector reallocation (and a
+        // click) on the audio thread.  Covers 4096-sample blocks at fold 16.
+        v.meshL.reserve (kMeshReserveSamples);
+        v.meshR.reserve (kMeshReserveSamples);
     }
 
     levelSmooth.reset (fs, 0.03);
@@ -142,10 +153,18 @@ KleinBottleAudioProcessor::BlockParams KleinBottleAudioProcessor::readBlockParam
     bp.levelGain   = juce::Decibels::decibelsToGain (bp.levelDb);
 
     static constexpr int nxMaxs[3]   = { 80, 112, 144 };
-    static constexpr int budgets[3]  = { 4000, 10000, 25000 };
+    static constexpr int budgets[3]  = { 4000, 10000, 25000 };   // at the 48 kHz reference rate
     const int q = juce::jlimit (0, 2, bp.quality);
     bp.nxMax      = nxMaxs[q];
-    bp.nodeBudget = budgets[q];
+    //  The budget counts node-steps per output sample, so the per-SECOND cost
+    //  (budget * fs) would grow linearly with the host sample rate: low notes
+    //  saturate the budget and a single note below ~A3 would peg a core in
+    //  96/192 kHz sessions (the standalone at 48 kHz stays fine - which made
+    //  this look like a host-only bug).  Normalise to the 48 kHz reference so
+    //  the load is rate-independent; very high rates trade a little timbre
+    //  density for bounded CPU.
+    const double rateScale = juce::jlimit (0.25, 2.0, 48000.0 / fs);
+    bp.nodeBudget = (int) std::max (2500.0, (double) budgets[q] * rateScale);
 
     return bp;
 }
@@ -164,9 +183,32 @@ Voice* KleinBottleAudioProcessor::findVoiceToSteal()
     return oldest;
 }
 
+Voice* KleinBottleAudioProcessor::findNewestActiveVoice()
+{
+    Voice* newest = nullptr;
+    for (auto& v : voices)
+        if (v.active && (newest == nullptr || v.order > newest->order))
+            newest = &v;
+    return newest;
+}
+
+int KleinBottleAudioProcessor::countActiveVoices() const
+{
+    int n = 0;
+    for (const auto& v : voices)
+        if (v.active)
+            ++n;
+    return n;
+}
+
 void KleinBottleAudioProcessor::startVoice (int note, float velocity, const BlockParams& bp)
 {
-    Voice& voice = *findVoiceToSteal();
+    const bool lowNoteGliss = (note <= 57 && bp.excType <= 2);
+    Voice* picked = lowNoteGliss ? findNewestActiveVoice() : nullptr;
+    if (picked == nullptr)
+        picked = findVoiceToSteal();
+
+    Voice& voice = *picked;
 
     voice.active   = true;
     voice.note     = note;
@@ -178,15 +220,18 @@ void KleinBottleAudioProcessor::startVoice (int note, float velocity, const Bloc
     voice.dcAx = voice.dcAy = voice.dcBx = voice.dcBy = 0.0f;
 
     // ---- note -> grid resolution (pitch) ---------------------------------
-    const double f0   = 440.0 * std::pow (2.0, (note - 69) / 12.0);
-    const auto   spec = KleinMesh::specForNote (fs, f0, bp.nxMax, bp.nodeBudget, bp.shape);
+    const double f0 = 440.0 * std::pow (2.0, (note - 69) / 12.0);
+    const int targetPoly = juce::jlimit (1, kMaxVoices, countActiveVoices() + (voice.active ? 0 : 1));
+    const int voiceBudget = std::max (1200, bp.nodeBudget / targetPoly);
+    const auto spec = KleinMesh::specForNote (fs, f0, bp.nxMax, voiceBudget, bp.shape);
     const int nx      = spec.nx;
     const int ny      = spec.ny;
     const int fold    = spec.fold;
 
     // ---- allocate / retune -------------------------------------------------
     const auto topo = (kb::Topology) juce::jlimit (0, 4, bp.topology);
-    voice.mesh.setTopology (topo);   // also rebuilds the boundary tables if changed
+    if (voice.mesh.getTopology() != topo)
+        voice.mesh.setTopology (topo);
     if (voice.mesh.getNx() != nx || voice.mesh.getNy() != ny)
         voice.mesh.resize (nx, ny);
     else
@@ -530,7 +575,15 @@ void KleinBottleAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         R[s] = std::tanh (R[s] * g * 3.0f);   // design, still a safety limiter
     }
 
-    updateSnapshot (bp);
+    // Refresh the GUI snapshot at ~timer rate, not at block rate: hosts that
+    // chop audio into small blocks (or run high sample rates) would otherwise
+    // copy the display field thousands of times per second.
+    snapshotCountdown -= numSamples;
+    if (snapshotCountdown <= 0)
+    {
+        snapshotCountdown = 2048;
+        updateSnapshot (bp);
+    }
 }
 
 } // namespace kb

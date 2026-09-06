@@ -6,8 +6,111 @@
 #include "KleinMesh.h"
 #include "KleinMesh.h"
 
+#include <cstring>
+#if defined (__AVX2__)
+ #include <immintrin.h>
+#endif
+
 namespace kb
 {
+
+namespace
+{
+    /*  Bit-level finiteness probe.  Unlike std::isfinite this cannot be folded
+        to a constant by fast-math optimisation (/fp:fast, -ffast-math), so the
+        NaN / Inf safety net of the mesh survives aggressive vectorisation.  */
+    inline bool bitsFinite (float x) noexcept
+    {
+        static_assert (sizeof (float) == sizeof (std::uint32_t));
+        std::uint32_t bits = 0;
+        std::memcpy (&bits, &x, sizeof (bits));
+        return (bits & 0x7F800000u) != 0x7F800000u;   // exponent != all-ones
+    }
+
+#if defined (__AVX2__)
+    /*  One full row of the mesh stencil, 8 nodes per vector step.  `rn` / `rs`
+        are the +y / -y neighbour sources; when the topology's y wrap flips x
+        (the Klein twist) the source row is walked backwards, expressed as a
+        lane-reversed vector load.  For x-periodic surfaces the two row-end
+        nodes close the x wrap in plain scalar.  The marginal-mode sums are
+        folded into the sweep, so no extra grid pass is needed.              */
+    inline void sweepRowAVX (const float* __restrict upj, const float* __restrict ucj,
+                             const float* __restrict rn, const float* __restrict rs,
+                             bool revN, bool revS, bool xPeriodicEnds,
+                             float* __restrict oj, int nxv, int pj,
+                             float s, float om,
+                             const __m256& vS, const __m256& vOm, const __m256& vHalf,
+                             const __m256& vLim, const __m256& vNegLim,
+                             const __m256& checker, const __m256& signFlip,
+                             __m256& accD, __m256& accC, double& tailD, double& tailC)
+    {
+        const __m256 sgn = (((1 + pj) & 1) != 0)
+                               ? _mm256_xor_ps (checker, signFlip)
+                               : checker;
+        const __m256i revIdx = _mm256_setr_epi32 (7, 6, 5, 4, 3, 2, 1, 0);
+
+        const int end = nxv - 1;
+        int i = 1;
+        for (; i + 8 <= end; i += 8)
+        {
+            const __m256 rnV = revN ? _mm256_permutevar8x32_ps (
+                                         _mm256_loadu_ps (rn + (nxv - 8 - i)), revIdx)
+                                    : _mm256_loadu_ps (rn + i);
+            const __m256 rsV = revS ? _mm256_permutevar8x32_ps (
+                                         _mm256_loadu_ps (rs + (nxv - 8 - i)), revIdx)
+                                    : _mm256_loadu_ps (rs + i);
+            __m256 x = _mm256_mul_ps (vHalf,
+                         _mm256_add_ps (
+                           _mm256_add_ps (_mm256_loadu_ps (ucj + i - 1),
+                                          _mm256_loadu_ps (ucj + i + 1)),
+                           _mm256_add_ps (rnV, rsV)));
+            x = _mm256_fnmadd_ps (vS,  _mm256_loadu_ps (ucj + i), x);
+            x = _mm256_fnmadd_ps (vOm, _mm256_loadu_ps (upj + i), x);
+            x = _mm256_max_ps (_mm256_min_ps (x, vLim), vNegLim);
+            _mm256_storeu_ps (oj + i, x);
+            accD = _mm256_add_ps (accD, x);
+            accC = _mm256_add_ps (accC, _mm256_mul_ps (sgn, x));
+        }
+        for (; i < end; ++i)   // scalar tail (same formula)
+        {
+            const float n  = revN ? rn[nxv - 1 - i] : rn[i];
+            const float sv = revS ? rs[nxv - 1 - i] : rs[i];
+            float x = 0.5f * (ucj[i - 1] + ucj[i + 1] + n + sv)
+                      - s * ucj[i] - om * upj[i];
+            x = std::min (std::max (x, -KleinMesh::kFieldLimit), KleinMesh::kFieldLimit);
+            oj[i] = x;
+            tailD += x;
+            tailC += (float) (1 - 2 * (((i + pj) & 1))) * x;
+        }
+
+        if (! xPeriodicEnds)
+            return;
+
+        // x-periodic row ends: W of i = 0 is nx-1, E of nx-1 is 0
+        {
+            const float n0 = revN ? rn[nxv - 1] : rn[0];
+            const float s0 = revS ? rs[nxv - 1] : rs[0];
+            float x = 0.5f * (ucj[nxv - 1] + ucj[1] + n0 + s0)
+                      - s * ucj[0] - om * upj[0];
+            x = std::min (std::max (x, -KleinMesh::kFieldLimit), KleinMesh::kFieldLimit);
+            oj[0] = x;
+            tailD += x;
+            tailC += (float) (1 - 2 * (pj & 1)) * x;
+        }
+        {
+            const int   i  = nxv - 1;
+            const float nE = revN ? rn[0] : rn[i];
+            const float sE = revS ? rs[0] : rs[i];
+            float x = 0.5f * (ucj[i - 1] + ucj[0] + nE + sE)
+                      - s * ucj[i] - om * upj[i];
+            x = std::min (std::max (x, -KleinMesh::kFieldLimit), KleinMesh::kFieldLimit);
+            oj[i] = x;
+            tailD += x;
+            tailC += (float) (1 - 2 * (((i + pj) & 1))) * x;
+        }
+    }
+#endif
+}
 
 KleinMesh::KleinMesh()
 {
@@ -40,15 +143,15 @@ int KleinMesh::indexOf (int i, int j, int nx, int ny, AxisMode xm, AxisMode ym) 
 
             case AxisMode::periodic:
             {
-                int r = a % n;
-                return r < 0 ? r + n : r;
+                // All callers are short-ranged (a in [-(n-1), 2n)), so this is
+                // equivalent to a % n (sign-fixed) without the integer division.
+                return a < 0 ? a + n : (a >= n ? a - n : a);
             }
 
             case AxisMode::flip:
             default:
             {
-                int r = a % n;
-                if (r < 0) r += n;
+                const int r = a < 0 ? a + n : (a >= n ? a - n : a);
                 other = otherN - 1 - other;
                 return r;
             }
@@ -86,6 +189,20 @@ float KleinMesh::sampleField (const float* field, int nx, int ny,
 }
 
 //==============================================================================
+//==============================================================================
+void KleinMesh::reserveMax (int maxNx, int maxNy)
+{
+    const size_t maxNodes = (size_t) std::max (4, maxNx) * (size_t) std::max (4, maxNy);
+    bufA.reserve (maxNodes);
+    bufB.reserve (maxNodes);
+    bufC.reserve (maxNodes);
+
+    const size_t maxEdges = (size_t) (2 * maxNx + 2 * maxNy);
+    edgeNode.reserve (maxEdges);
+    edgeNb.reserve (4 * maxEdges);
+    edgeCk.reserve (maxEdges);
+}
+
 void KleinMesh::resize (int newNx, int newNy)
 {
     nx = std::max (4, newNx);
@@ -97,8 +214,10 @@ void KleinMesh::resize (int newNx, int newNy)
 
     bufA.assign ((size_t) nx * (size_t) ny, 0.0f);
     bufB.assign ((size_t) nx * (size_t) ny, 0.0f);
+    bufC.assign ((size_t) nx * (size_t) ny, 0.0f);
     uPrev = bufA.data();
     uCurr = bufB.data();
+    uNext = bufC.data();
     stepCount = 0;
 
     rebuildTables();
@@ -108,13 +227,18 @@ void KleinMesh::clear() noexcept
 {
     std::fill (bufA.begin(), bufA.end(), 0.0f);
     std::fill (bufB.begin(), bufB.end(), 0.0f);
+    std::fill (bufC.begin(), bufC.end(), 0.0f);
     uPrev = bufA.data();
     uCurr = bufB.data();
+    uNext = bufC.data();
     stepCount = 0;
 }
 
 void KleinMesh::setTopology (Topology t)
 {
+    if (topo == t)
+        return;
+
     topo = t;
     const auto ax = axesFor (t);
     xm = ax.x;
@@ -126,12 +250,14 @@ void KleinMesh::rebuildTables()
 {
     edgeNode.clear();
     edgeNb.clear();
+    edgeCk.clear();
 
     const bool   tiny     = (nx < 3 || ny < 3);
     const size_t expected = tiny ? (size_t) nx * (size_t) ny
                                  : (size_t) (2 * nx + 2 * ny - 4);
     edgeNode.reserve (expected);
     edgeNb.reserve (4 * expected);
+    edgeCk.reserve (expected);
 
     for (int j = 0; j < ny; ++j)
         for (int i = 0; i < nx; ++i)
@@ -145,44 +271,169 @@ void KleinMesh::rebuildTables()
             edgeNb.push_back (nodeIndex (i - 1, j)); // W
             edgeNb.push_back (nodeIndex (i, j + 1)); // N
             edgeNb.push_back (nodeIndex (i, j - 1)); // S
+            edgeCk.push_back (((i + j) & 1) != 0 ? -1.0f : 1.0f);
         }
 }
 
 //==============================================================================
 void KleinMesh::step()
 {
-    float*      up  = uPrev;
-    float*      uc  = uCurr;
-    float*      dst = uPrev;   // the next field overwrites the n-1 buffer
+    /*  Three rotating buffers: the update reads u[n] and u[n-1] and writes
+        u[n+1] into the spare buffer, so the destination never aliases a
+        source.  The __restrict qualified pointers let the compiler
+        auto-vectorise the sweeps (the old two-buffer version, where the
+        destination overwrote the u[n-1] buffer, had to assume aliasing and
+        fell back to scalar code - roughly 3x slower).                     */
+    float* __restrict up  = uPrev;    // u[n-1]
+    float* __restrict uc  = uCurr;    // u[n]
+    float* __restrict dst = uNext;    // u[n+1]
     const float s   = sigma;
     const float om  = 1.0f - sigma;
 
-    if (nx >= 3 && ny >= 3)
-    {
-        for (int j = 1; j < ny - 1; ++j)
-        {
-            const float* ucj = uc + (size_t) j * nx;
-            const float* rn  = uc + (size_t) (j + 1) * nx;
-            const float* rs  = uc + (size_t) (j - 1) * nx;
-            const float* upj = up + (size_t) j * nx;
-            float*       oj  = dst + (size_t) j * nx;
+    // Loop bounds are copied to locals: through the member pointers the stores
+    // below could otherwise alias the member variables nx / ny, which forces
+    // the vectoriser into scalar fallbacks.
+    const int nxv = nx;
+    const int nyv = ny;
 
-            for (int i = 1; i < nx - 1; ++i)
+    // The marginal-mode projections below are measured while the new field is
+    // written, so no separate full-grid measurement sweep is needed.
+    double sumD = 0.0, sumC = 0.0;
+    bool interiorDone = false;
+    bool edgesDone = false;
+
+#if defined (__AVX2__)
+    if (nxv >= 3 && nyv >= 3)
+    {
+        const __m256 vS      = _mm256_set1_ps (s);
+        const __m256 vOm     = _mm256_set1_ps (om);
+        const __m256 vHalf   = _mm256_set1_ps (0.5f);
+        const __m256 vLim    = _mm256_set1_ps (kFieldLimit);
+        const __m256 vNegLim = _mm256_sub_ps (_mm256_setzero_ps(), vLim);
+        const __m256 signFlip = _mm256_set1_ps (-0.0f);
+        const __m256 checker  = _mm256_setr_ps (1.0f, -1.0f, 1.0f, -1.0f,
+                                                1.0f, -1.0f, 1.0f, -1.0f);
+        __m256 accD = _mm256_setzero_ps();
+        __m256 accC = _mm256_setzero_ps();
+        double tailD = 0.0, tailC = 0.0;
+
+        auto hsum = [] (__m256 v) -> double
+        {
+            __m128 lo = _mm256_castps256_ps128 (v);
+            lo = _mm_add_ps (lo, _mm256_extractf128_ps (v, 1));
+            lo = _mm_add_ps (lo, _mm_movehl_ps (lo, lo));
+            lo = _mm_add_ss (lo, _mm_shuffle_ps (lo, lo, 1));
+            return (double) _mm_cvtss_f32 (lo);
+        };
+
+        if (xm == AxisMode::periodic)
+        {
+            /*  x-periodic surfaces (Klein / Torus / Cylinder): every row is a
+                1-D periodic stencil, so ALL nodes - the y-boundary rows and
+                the row-end columns included - go through the vectorised sweep.
+                Degenerate low-note grids (ny = 4 in high-rate sessions) stay
+                fully vectorised instead of falling into the gather tables.  */
+            for (int j = 0; j < nyv; ++j)
             {
-                const float x = 0.5f * (ucj[i - 1] + ucj[i + 1] + rn[i] + rs[i])
-                                - s * ucj[i] - om * upj[i];
-                oj[i] = x < -kFieldLimit ? -kFieldLimit : (x > kFieldLimit ? kFieldLimit : x);
+                const size_t row = (size_t) j * nxv;
+                const float* ucj = uc + row;
+                const float* upj = up + row;
+                float*       oj  = dst + row;
+
+                const float* rn;
+                const float* rs;
+                bool revN = false, revS = false;
+
+                if (j == 0)
+                {
+                    rn = uc + nxv;                            // row 1
+                    if (ym == AxisMode::flip)       { rs = uc + (size_t) (nyv - 1) * nxv; revS = true; }
+                    else if (ym == AxisMode::clamp) { rs = ucj; }         // reflecting boundary
+                    else                            { rs = uc + (size_t) (nyv - 1) * nxv; }
+                }
+                else if (j == nyv - 1)
+                {
+                    rs = uc + (size_t) (nyv - 2) * nxv;       // row ny-2
+                    if (ym == AxisMode::flip)       { rn = uc; revN = true; }
+                    else if (ym == AxisMode::clamp) { rn = ucj; }         // reflecting boundary
+                    else                            { rn = uc; }
+                }
+                else
+                {
+                    rn = uc + (size_t) (j + 1) * nxv;
+                    rs = uc + (size_t) (j - 1) * nxv;
+                }
+
+                sweepRowAVX (upj, ucj, rn, rs, revN, revS, true, oj, nxv, j & 1,
+                             s, om, vS, vOm, vHalf, vLim, vNegLim, checker, signFlip,
+                             accD, accC, tailD, tailC);
+            }
+            interiorDone = true;   // every node of every row was swept above
+            edgesDone = true;
+        }
+        else
+        {
+            /*  Mobius / Membrane flip or clamp along x: the interior has no
+                wrap involvement and still sweeps vectorised; the wrap-affected
+                columns and y-boundary rows fall through to the edge tables.  */
+            for (int j = 1; j < nyv - 1; ++j)
+            {
+                const size_t row = (size_t) j * nxv;
+                sweepRowAVX (up + row, uc + row,
+                             uc + (size_t) (j + 1) * nxv, uc + (size_t) (j - 1) * nxv,
+                             false, false, false, dst + row, nxv, j & 1,
+                             s, om, vS, vOm, vHalf, vLim, vNegLim, checker, signFlip,
+                             accD, accC, tailD, tailC);
+            }
+            interiorDone = true;
+        }
+
+        sumD = hsum (accD) + tailD;
+        sumC = hsum (accC) + tailC;
+    }
+#endif
+    if (! interiorDone && nxv >= 3 && nyv >= 3)
+    {
+        const int nxm1 = nxv - 1;
+        for (int j = 1; j < nyv - 1; ++j)
+        {
+            const float* __restrict ucj = uc + (size_t) j * nxv;
+            const float* __restrict rn  = uc + (size_t) (j + 1) * nxv;
+            const float* __restrict rs  = uc + (size_t) (j - 1) * nxv;
+            const float* __restrict upj = up + (size_t) j * nxv;
+            float*       __restrict oj  = dst + (size_t) j * nxv;
+            const int    pj = j & 1;
+
+            for (int i = 1; i < nxm1; ++i)
+            {
+                float x = 0.5f * (ucj[i - 1] + ucj[i + 1] + rn[i] + rs[i])
+                          - s * ucj[i] - om * upj[i];
+                x = std::min (std::max (x, -kFieldLimit), kFieldLimit);
+                oj[i] = x;
+                sumD += x;
+                // checkerboard sign, branchless (ternaries block auto-vectorisation)
+                sumC += (float) (1 - 2 * (((i + pj) & 1))) * x;
             }
         }
     }
 
-    for (size_t e = 0; e < edgeNode.size(); ++e)
+    if (! edgesDone)
     {
-        const int   k  = edgeNode[e];
-        const int*  nb = &edgeNb[4 * e];
-        const float x  = 0.5f * (uc[nb[0]] + uc[nb[1]] + uc[nb[2]] + uc[nb[3]])
-                         - s * uc[k] - om * up[k];
-        dst[k] = x < -kFieldLimit ? -kFieldLimit : (x > kFieldLimit ? kFieldLimit : x);
+        const size_t edgeCount = edgeNode.size();
+        const int*   __restrict edgeIdx = edgeNode.data();
+        const int*   __restrict edgeNb4 = edgeNb.data();
+        const float* __restrict edgeCk4 = edgeCk.data();
+        for (size_t e = 0; e < edgeCount; ++e)
+        {
+            const int k  = edgeIdx[e];
+            const int* nb = edgeNb4 + 4 * e;
+            float x = 0.5f * (uc[nb[0]] + uc[nb[1]] + uc[nb[2]] + uc[nb[3]])
+                      - s * uc[k] - om * up[k];
+            x = std::min (std::max (x, -kFieldLimit), kFieldLimit);
+            dst[k] = x;
+            sumD += x;
+            sumC += edgeCk4[e] * x;   // sign pre-computed in rebuildTables()
+        }
     }
 
     // Project out the two *marginal* modes of the leapfrog scheme: the uniform
@@ -192,44 +443,35 @@ void KleinMesh::step()
     // are orthogonal to every other mode, so the rest of the mesh still obeys
     // exactly the same wave equation.
     {
-        double sumD = 0.0, sumC = 0.0;
-        const int total = nx * ny;
-        for (int j = 0; j < ny; ++j)
-        {
-            const float* row = dst + (size_t) j * nx;
-            const int pj = j & 1;
-            for (int i = 0; i < nx; ++i)
-            {
-                const float v = row[i];
-                sumD += v;
-                sumC += ((i + pj) & 1) ? -v : v;
-            }
-        }
-        const float mean = (float) (sumD / (double) total);
-        const float nyq  = (float) (sumC / (double) total);
+        const float mean = (float) (sumD / (double) (nxv * nyv));
+        const float nyq  = (float) (sumC / (double) (nxv * nyv));
         if (std::abs (mean) > 1.0e-6f || std::abs (nyq) > 1.0e-6f)
         {
-            for (int j = 0; j < ny; ++j)
+            for (int j = 0; j < nyv; ++j)
             {
-                float* row = dst + (size_t) j * nx;
                 const int pj = j & 1;
-                for (int i = 0; i < nx; ++i)
-                    row[i] -= mean + (((i + pj) & 1) ? -nyq : nyq);
+                float* __restrict row = dst + (size_t) j * nxv;
+                // (i + pj) even -> (mean + nyq), odd -> (mean - nyq), written
+                // branchless so the sweep stays vectorisable.
+                for (int i = 0; i < nxv; ++i)
+                    row[i] -= mean + nyq * (float) (1 - 2 * (((i + pj) & 1)));
             }
         }
     }
 
     if ((++stepCount & 0xFF) == 0)
     {
-        if (! (std::isfinite (dst[0]) && std::isfinite (dst[(size_t) nx * ny / 2])))
+        if (! (bitsFinite (dst[0]) && bitsFinite (dst[(size_t) nxv * nyv / 2])))
         {
             clear();
             return;
         }
     }
 
+    // rotate: (prev, curr, next) <- (curr, next, prev)
     uPrev = uc;
     uCurr = dst;
+    uNext = up;
 }
 
 //==============================================================================
@@ -318,11 +560,13 @@ KleinMesh::GridSpec KleinMesh::specForNote (double fs, double f0, int nxMax, int
     GridSpec spec;
     constexpr double kRoot2 = 1.4142135623730951;
 
-    int fold = 1;
+    int  fold      = 1;
+    bool pitchBent = false;
     while (true)
     {
         const int nxT = (int) std::lround (fs / (kRoot2 * f0 * (double) fold));
         spec.nx = std::min (std::max (nxT, 12), nxMax);
+        pitchBent = (nxT > nxMax);   // the cap forced a sharper grid: pitch bends
 
         const int nyShape  = (int) std::lround ((double) spec.nx * shape);
         const int nyBudget = nodeBudget / (fold * spec.nx);
@@ -335,6 +579,17 @@ KleinMesh::GridSpec KleinMesh::specForNote (double fs, double f0, int nxMax, int
         if ((pitchOk && fold * spec.nx * spec.ny <= nodeBudget) || fold >= 16)
             break;
         fold *= 2;
+    }
+
+    //  The fold cap was reached while the pitch was already bent (the grid cap
+    //  could never fit nxT, typical for very low notes in high-rate sessions):
+    //  the ny = 4 floor would then blow past the node budget (e.g. 16x112x4 at
+    //  192 kHz = 3x the budget).  Shrink the grid further - the pitch is
+    //  approximate here anyway - so the CPU cost stays bounded.
+    if (pitchBent && fold * spec.nx * spec.ny > nodeBudget)
+    {
+        spec.nx = std::max (12, nodeBudget / (fold * 4));
+        spec.ny = 4;
     }
     return spec;
 }

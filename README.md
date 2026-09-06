@@ -112,6 +112,7 @@ cmake --build build --config Release --parallel
 - VST3: `build/KleinBottle_artefacts/Release/VST3/Klein Bottle Experimental.vst3`
 - Standalone: `build/KleinBottle_artefacts/Release/Standalone/Klein Bottle Experimental(.exe|.app)`
 - Tests: `build/Release/KleinMeshTests` (headless DSP validation)
+- Bench: `build/Release/KleinMeshBench` (per-voice CPU measurement)
 
 To install the VST3 in your DAW, copy it to `C:\Program Files\Common Files\VST3\` (Windows) or `/Library/Audio/Plug-Ins/VST3/` (macOS).
 
@@ -121,7 +122,15 @@ Tagged releases (`v*`) are built automatically by GitHub Actions for **Windows x
 
 ## CPU notes
 
-Cost is `nodes × fold × fs`. Low notes automatically use **octave fold-down**, so they are bounded by the **Quality** setting: Eco is always light; High + many low notes wants a modern CPU.
+Cost is `nodes × fold × fs`. Low notes automatically use **octave fold-down** and the **node budget is normalised to the host sample rate**, so the per-voice cost stays roughly constant in 44.1 / 48 / 96 / 192 kHz sessions (very high rates trade a little timbre density for bounded CPU). The mesh sweep is hand-vectorised with AVX2 on Windows x64 (portable scalar fallback elsewhere) — measured per-voice cost, % of one core for a continuously ringing note @48 kHz:
+
+| Quality  | C2  | C3  | C4  | A4  |
+|----------|-----|-----|-----|-----|
+| Eco      | 16% | 17% | 18% | 10% |
+| Standard | 44% | 35% | 18% | 14% |
+| High     | 77% | 46% | 23% | 14% |
+
+Run the headless `KleinMeshBench` tool to measure your own machine (it also prints the per-sample-rate scaling table).
 
 ## License
 

@@ -110,6 +110,8 @@ private:
     BlockParams readBlockParams() const;
     void updateSnapshot (const BlockParams& bp);
     Voice* findVoiceToSteal();
+    Voice* findNewestActiveVoice();
+    int countActiveVoices() const;
     std::atomic<float>* P (const char* id) const;
 
     //==========================================================================
@@ -134,7 +136,11 @@ private:
     Voice    voices[kMaxVoices];
     int      displayVoice = -1;
     int      lastTopology = -1;         // topology currently loaded into the meshes
+    int      snapshotCountdown = 0;     // samples left until the next GUI snapshot
     std::uint64_t voiceOrder = 0;
+
+    // 4096-sample blocks x fold 16: largest realistic per-voice scratch buffer
+    static constexpr int kMeshReserveSamples = 4096 * 16;
 
     double fs = 48000.0;
     std::atomic<bool>  pluckRequested { false };

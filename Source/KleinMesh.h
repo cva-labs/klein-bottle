@@ -71,6 +71,13 @@ public:
     /** (Re)allocate the grid and clear it. */
     void resize (int newNx, int newNy);
     void clear() noexcept;
+
+    /** Pre-reserve buffer capacity for the largest grid this mesh will ever be
+        asked for.  Call once (off the audio thread, e.g. prepareToPlay) so
+        that later resize() calls during real-time note-on/voice-stealing -
+        the fast path during glissandos on low notes, where the grid sits
+        closest to its cap - never trigger a heap (re)allocation. */
+    void reserveMax (int maxNx, int maxNy);
     void setTopology (Topology t);
     void setDamping (float sigmaPerSample) noexcept
     {
@@ -137,12 +144,15 @@ private:
     int      ny    = 0;
     float    sigma = 0.0f;
 
-    std::vector<float> bufA, bufB;
+    std::vector<float> bufA, bufB, bufC;
     float* uPrev = nullptr;   // u[n-1]
     float* uCurr = nullptr;   // u[n]
+    float* uNext = nullptr;   // u[n+1] scratch (rotates into uCurr by step())
 
-    // Boundary nodes and their pre-resolved 4 neighbour indices (E, W, N, S).
-    std::vector<int> edgeNode, edgeNb;
+    // Boundary nodes, their pre-resolved 4 neighbour indices (E, W, N, S) and
+    // their pre-computed checkerboard sign (+1/-1) for the marginal-mode sweep.
+    std::vector<int>   edgeNode, edgeNb;
+    std::vector<float> edgeCk;
 
     std::mt19937                          rng   { 0x6B6C4549u };
     std::uniform_real_distribution<float> rng01 { 0.0f, 1.0f };

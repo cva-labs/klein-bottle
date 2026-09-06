@@ -420,6 +420,7 @@ static void testVoiceLevelSpread()
 
 int main()
 {
+    std::setvbuf (stdout, nullptr, _IONBF, 0);   // survive hard kills mid-run
     std::printf ("== KleinMesh validation suite ==\n");
     testTopologyTables();
     testStability();
