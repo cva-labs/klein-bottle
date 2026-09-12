@@ -1,4 +1,4 @@
-# Klein Bottle Experimental (v1.0) — CVA Labs
+# Klein Bottle Experimental (v2.0) — CVA Labs
 
 A **physical-modelling synthesizer** whose resonator is a digital waveguide mesh living on the surface of a **Klein bottle** — a closed surface with no inside or outside. Struck, plucked, bowed or blown, every note vibrates across a topology that cannot exist in 3D space.
 
@@ -44,15 +44,15 @@ The grid is a **quotient space**; each axis closes in one of three ways:
 | `flip`    | `(x, y) ~ (x, y + ny)` with `x → nx−1−x`       |
 | `clamp`   | reflecting edge (free boundary)                |
 
-The Klein bottle is **periodic in x + flipped in y**: a wave that circles the twisted direction comes back *travelling the other way, phase-mirrored*. The surface can never consistently have an "inside". The **Topology** switch re-identifies all four voice meshes live — Klein bottle, Torus, Möbius band, Cylinder, Membrane — and the 3-D view re-draws itself.
+The Klein bottle is **periodic in x + flipped in y**: a wave that circles the twisted direction comes back *travelling the other way, phase-mirrored*. The surface can never consistently have an "inside". The **Topology** switch re-identifies all four voice meshes live — Klein bottle, Möbius band or Membrane — and the 3-D view re-draws itself.
 
-**→ You hear:** the same excitation produces completely different mode spectra per topology. The Klein/Möbius identifications are non-separable — no two independent "string" dimensions — so the partials are inharmonic and slowly morph, unlike the torus, which behaves like two coupled loops.
+**→ You hear:** the same excitation produces three strongly different instruments: an asymmetric, wide Klein field; an anti-phase, twisted Möbius spectrum; or a dark, centred membrane response.
 
 ### 4. Note ↔ pitch ↔ grid size
 
 The fundamental of the longest axis is `f₀ ≈ fs / (√2 · nx)`. A note-on therefore **rebuilds the mesh at the resolution that makes the surface itself resonate at that pitch** — the tuning is the geometry, never a detuned playback. For low notes the required `nx` would be huge, so the voice runs the mesh at `fold · fs` (an octave or more up) and box-averages the output down: exact pitch, bounded CPU. A per-note **node budget** keeps the worst case affordable.
 
-**→ You hear:** every note is a *different physical object* of the same family; timbre drifts across the keyboard the way real instruments do. A register tilt (+3.5 dB/octave around C3, clamped) keeps all notes equally present.
+**→ You hear:** every note is a *different physical object* of the same family; timbre drifts across the keyboard the way real instruments do. A subtle tuned fundamental keeps the played pitch identifiable even when the topology produces stronger inharmonic modes.
 
 
 ### 5. Exciters ↔ playing technique
@@ -80,13 +80,27 @@ Per-voice register compensation → voice make-up gain → smoothed output level
 ## Features
 
 - **Polyphonic** (4 voices × independent mesh), full MIDI input
-- Live **Topology** morphing: Klein / Torus / Möbius / Cylinder / Membrane — view and sound reshape together, no note needed
+- Live **Topology** morphing: Klein / Möbius / Membrane — view and sound reshape together, no note needed
 - Exciters: Mallet / Pluck / Noise Burst / Bow / **Wind**
-- Pickup displacement/velocity, stereo spread, exciter key-tracking, motion orbit
+- Streamlined performance controls: Topology, Exciter, Decay, Tone, Motion, Width and Level
+- Eight factory presets spanning struck, plucked, bowed, blown and noise-driven sounds
+- Topology-specific excitation and pickup models for strongly differentiated timbres
+- Tuned fundamental reinforcement for clear MIDI pitch tracking across the keyboard
 - Animated **3-D visualisation** of the actual immersion, colour-mapped by the real vibration field (drag = rotate, wheel = zoom)
 - **Note ribbon**: drag horizontally to play (re-triggers per semitone), vertical position = velocity
 - Sustain pedal (CC64), mod wheel (CC1), Pluck / Panic buttons
 - Headless **DSP test suite** (topology tables, stability, T60 accuracy, pitch mapping, bow & wind sustain)
+
+### Factory presets
+
+- Deep Klein Gong
+- Fractured Klein
+- Mobius Bell
+- Bowed Glass
+- Breathing Vessel
+- Dust Membrane
+- Mobius Motion
+- Short Wood
 
 ## Building from source
 

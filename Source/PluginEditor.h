@@ -4,7 +4,6 @@
     SPDX-License-Identifier: AGPL-3.0-or-later
 */
 #pragma once
-#pragma once
 
 #include <cmath>
 
@@ -190,7 +189,9 @@ private:
 
     juce::TextButton pluckButton { "Pluck" };
     juce::TextButton panicButton { "Panic" };
-    GroupPanel group[4] { { "Resonator" }, { "Exciter" }, { "Pickup" }, { "Output" } };
+    juce::ComboBox presetBox;
+    juce::Label presetLabel;
+    GroupPanel group[3] { { "Sound" }, { "Movement" }, { "Output" } };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (KleinBottleAudioProcessorEditor)
 };

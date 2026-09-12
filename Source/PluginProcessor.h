@@ -4,11 +4,12 @@
     SPDX-License-Identifier: AGPL-3.0-or-later
 */
 #pragma once
-#pragma once
 
 #include <juce_audio_utils/juce_audio_utils.h>
 
 #include "KleinVoice.h"
+
+#include <array>
 
 namespace kb
 {
@@ -46,10 +47,10 @@ public:
     bool isMidiEffect() const override { return false; }
     double getTailLengthSeconds() const override { return 30.0; }
 
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    int getNumPrograms() override;
+    int getCurrentProgram() override { return currentProgram.load(); }
+    void setCurrentProgram (int) override;
+    const juce::String getProgramName (int) override;
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
@@ -70,7 +71,7 @@ public:
 
     void getDisplaySnapshot (DisplaySnapshot& out) const;
     void triggerPluck() { pluckRequested.store (true, std::memory_order_relaxed); }
-    void panic();
+    void panic() noexcept { panicRequested.store (true, std::memory_order_release); }
 
     juce::AudioProcessorValueTreeState apvts;
     juce::MidiKeyboardState keyboardState;
@@ -86,7 +87,7 @@ private:
         float pickU = 0.68f, pickV = 0.50f, spread = 0.40f, levelDb = -12.0f;
 
         // derived
-        float sigma = 0.0f, motionRate = 0.0f, motionAmt = 0.0f;
+        float sigma = 0.0f, t60 = 1.0f, motionRate = 0.0f, motionAmt = 0.0f;
         float bowSpeed = 0.15f, bowSharp = 50.0f, levelGain = 0.25f;
         int   nxMax = 112, nodeBudget = 10000;
     };
@@ -105,7 +106,9 @@ private:
 
     void startVoice (int note, float velocity, const BlockParams& bp);
     void releaseNote (int note);
+    void handleMidiMessage (const juce::MidiMessage& message, const BlockParams& bp);
     void allNotesOff (bool hard);
+    void performPanic();
     void renderVoice (int index, juce::AudioBuffer<float>& buffer, const BlockParams& bp);
     BlockParams readBlockParams() const;
     void updateSnapshot (const BlockParams& bp);
@@ -144,13 +147,15 @@ private:
 
     double fs = 48000.0;
     std::atomic<bool>  pluckRequested { false };
+    std::atomic<bool>  panicRequested { false };
     std::atomic<float> modWheel { 0.0f };
     float  modWheelTarget = 0.0f;
     bool   sustainHeld = false;
     std::vector<int> sustainedNotes;
 
-    mutable juce::CriticalSection pendingLock;
-    std::vector<PendingEvent> pendingQueue;
+    static constexpr int kPendingCapacity = 256;
+    std::array<PendingEvent, kPendingCapacity> pendingEvents {};
+    juce::AbstractFifo pendingFifo { kPendingCapacity };
 
     double motionPhase = 0.0;
 
@@ -158,6 +163,7 @@ private:
     DisplaySnapshot snapshot;
 
     juce::SmoothedValue<float> levelSmooth;
+    std::atomic<int> currentProgram { 0 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (KleinBottleAudioProcessor)
 };

@@ -4,7 +4,6 @@
     SPDX-License-Identifier: AGPL-3.0-or-later
 */
 #include "PluginProcessor.h"
-#include "PluginProcessor.h"
 #include "Parameters.h"
 
 #include <cmath>
@@ -24,6 +23,25 @@ namespace
     // (individually) closer to the mallet/pluck level.
     constexpr float kBowMakeUp  = 2.2f;
     constexpr float kWindMakeUp = 1.3f;
+
+    struct FactoryPreset
+    {
+        const char* name;
+        int topology, exciter, pickupMode, quality;
+        float shape, decay, excU, excV, force, tone, motion, keyTrack;
+        float pickU, pickV, width, level;
+    };
+
+    constexpr FactoryPreset factoryPresets[] = {
+        { "Deep Klein Gong", 0, 0, 1, 1, .72f, .82f, .19f, .36f, .95f, .72f, .12f, .42f, .71f, .57f, .72f, -8.f },
+        { "Fractured Klein",  0, 1, 1, 1, .38f, .73f, .31f, .22f, .78f, .88f, .58f, .66f, .63f, .41f, .84f, -9.f },
+        { "Mobius Bell",      1, 0, 1, 2, .53f, .69f, .13f, .73f, .86f, .93f, .25f, .35f, .79f, .29f, .58f, -10.f },
+        { "Bowed Glass",      0, 3, 0, 1, .44f, .76f, .38f, .61f, .70f, .64f, .10f, .28f, .66f, .54f, .67f, -11.f },
+        { "Breathing Vessel", 0, 4, 0, 1, .81f, .61f, .27f, .45f, .82f, .30f, .46f, .55f, .74f, .62f, .92f, -10.f },
+        { "Dust Membrane",    2, 2, 1, 1, .64f, .39f, .47f, .51f, .88f, .18f, .05f, .20f, .58f, .46f, .38f, -7.f },
+        { "Mobius Motion",    1, 1, 1, 1, .33f, .57f, .22f, .67f, .84f, .55f, .82f, .73f, .69f, .35f, 1.0f, -9.f },
+        { "Short Wood",       2, 0, 0, 0, .48f, .22f, .42f, .33f, .72f, .15f, .00f, .47f, .61f, .52f, .25f, -5.f }
+    };
 }
 
 //==============================================================================
@@ -50,6 +68,7 @@ KleinBottleAudioProcessor::KleinBottleAudioProcessor()
     pLevel     = P (param::level);
 
     keyboardState.addListener (this);
+    setCurrentProgram (0);
 }
 
 KleinBottleAudioProcessor::~KleinBottleAudioProcessor()
@@ -91,11 +110,9 @@ void KleinBottleAudioProcessor::prepareToPlay (double sampleRate, int /*samplesP
     levelSmooth.setCurrentAndTargetValue (
         juce::Decibels::decibelsToGain (pLevel != nullptr ? pLevel->load() : -6.0f));
 
-    {
-        const juce::ScopedLock sl (pendingLock);
-        pendingQueue.clear();
-    }
+    pendingFifo.reset();
     sustainedNotes.clear();
+    sustainedNotes.reserve (128);
     sustainHeld = false;
     modWheel.store (0.0f);
     modWheelTarget = 0.0f;
@@ -129,7 +146,10 @@ KleinBottleAudioProcessor::BlockParams KleinBottleAudioProcessor::readBlockParam
     bp.pitch    = pPitch->load();
     bp.shape    = pShape->load();
     bp.decay    = pDecay->load();
-    bp.topology = (int) pTopology->load();
+    // Public parameter has three compact choices; the mesh keeps its original
+    // enum values so old DSP/test code remains stable.
+    static constexpr int topologyMap[] = { 0, 2, 4 };
+    bp.topology = topologyMap[juce::jlimit (0, 2, (int) pTopology->load())];
     bp.quality  = (int) pQuality->load();
     bp.excType  = (int) pExcType->load();
     bp.excU     = pExcU->load();
@@ -145,6 +165,7 @@ KleinBottleAudioProcessor::BlockParams KleinBottleAudioProcessor::readBlockParam
     bp.levelDb  = pLevel->load();
 
     const double t60 = 0.02 * std::pow (1500.0, (double) bp.decay);   // 20 ms .. 30 s
+    bp.t60         = (float) t60;
     bp.sigma       = KleinMesh::sigmaForT60 (t60, fs);
     bp.motionAmt   = bp.motion;
     bp.motionRate  = 0.05f + 0.75f * bp.motion;
@@ -218,6 +239,7 @@ void KleinBottleAudioProcessor::startVoice (int note, float velocity, const Bloc
     voice.blowing  = (bp.excType == 4);
     voice.silenceTime = 0.0f;
     voice.dcAx = voice.dcAy = voice.dcBx = voice.dcBy = 0.0f;
+    voice.toneL = voice.toneR = 0.0f;
 
     // ---- note -> grid resolution (pitch) ---------------------------------
     const double f0 = 440.0 * std::pow (2.0, (note - 69) / 12.0);
@@ -245,11 +267,20 @@ void KleinBottleAudioProcessor::startVoice (int note, float velocity, const Bloc
     voice.fold = fold;
 
     // ---- exciter placement -------------------------------------------------
-    // Register tilt: folded/low voices are naturally quieter (box-average of
-    // the oversampled signal + lower pickup efficiency), so lift them and trim
-    // the top octaves.  Slope 3.5 dB/octave anchored at C3.
-    const double compDb = juce::jlimit (-6.0, 8.0, -3.5 * std::log2 (f0 / 130.81278265));
-    voice.levelComp = (float) std::pow (10.0, compDb / 20.0);
+    // Keep keyboard level neutral. The previous curve boosted the bass by 8 dB
+    // and cut the upper register by 6 dB, creating a pronounced drop above C4.
+    voice.levelComp = 1.0f;
+
+    // A quiet tuned core makes the played pitch perceptually identifiable even
+    // when an inharmonic topology has a stronger upper mode. The mesh remains
+    // the dominant sound and supplies all spatial and nonlinear behaviour.
+    voice.tonalPhase = 0.0;
+    voice.tonalPhaseInc = juce::MathConstants<double>::twoPi * f0 / fs;
+    const float topologyTonalLevel = bp.topology == 0 ? 0.0040f
+                                   : bp.topology == 2 ? 0.0022f : 0.0075f;
+    voice.tonalLevel = topologyTonalLevel * bp.force * (0.35f + 0.65f * voice.velocity);
+    voice.tonalEnv = voice.tonalLevel;
+    voice.tonalDecay = (float) std::exp (-6.90775527898 / (std::max (0.02, (double) bp.t60) * fs));
 
     voice.baseU = wrap01f (bp.excU + bp.keyTrack * (float) (note - 24) / 72.0f);
     voice.baseV = wrap01f (bp.excV);
@@ -273,6 +304,13 @@ void KleinBottleAudioProcessor::startVoice (int note, float velocity, const Bloc
         case 0:
         default: voice.mesh.strike (mu, mv, 3.0f * amp); break;
     }
+
+    // Topology signatures excite different modal families from the first
+    // sample, rather than waiting for the wavefront to reach a boundary.
+    if (bp.topology == (int) Topology::mobius)
+        voice.mesh.strike (1.0f - mu, 1.0f - mv, -1.35f * amp);
+    else if (bp.topology == (int) Topology::membrane)
+        voice.mesh.pluck (0.5f, 0.5f, 0.85f * amp);
 
     displayVoice = (int) (&voice - voices);
 }
@@ -307,7 +345,7 @@ void KleinBottleAudioProcessor::allNotesOff (bool hard)
     }
 }
 
-void KleinBottleAudioProcessor::panic()
+void KleinBottleAudioProcessor::performPanic()
 {
     sustainedNotes.clear();
     sustainHeld = false;
@@ -341,10 +379,29 @@ void KleinBottleAudioProcessor::renderVoice (int index, juce::AudioBuffer<float>
     v.liveU = mu;
     v.liveV = mv;
 
-    const float pu2      = wrap01f (bp.pickU + 0.25f * bp.spread);
-    const bool  velRead  = (bp.pickMode == 1);
+    const int topology = (int) mesh.getTopology();
+    const float pu2 = wrap01f (bp.pickU + 0.25f * bp.spread);
+    float secondU = pu2;
+    float secondV = bp.pickV;
+    if (topology == 2)          // Mobius: hear across the flipped seam
+    {
+        secondU = wrap01f (1.0f - pu2);
+        secondV = 1.0f - bp.pickV;
+    }
+    else if (topology == 4)     // membrane: opposing point on the bounded plate
+    {
+        secondU = 1.0f - pu2;
+        secondV = 1.0f - bp.pickV;
+    }
+    const bool velRead = topology == 2 ? true : (topology == 4 ? false : bp.pickMode == 1);
     const float bowPress = 0.014f * bp.force * (0.3f + 0.7f * v.velocity);
     const float windAmp  = 0.045f * bp.force * (0.3f + 0.7f * v.velocity);
+    // A single broad Tone control now has an obvious effect on every exciter.
+    // At the dark end this one-pole filter removes most of the mesh's brittle
+    // upper modes; at the bright end it is effectively transparent.
+    static constexpr float topologyBrightness[] = { 0.82f, 0.0f, 1.15f, 0.0f, 0.16f };
+    const float toneCoeff = juce::jlimit (0.01f, 1.0f,
+        (0.035f + 0.965f * bp.hard * bp.hard) * topologyBrightness[topology]);
 
     for (int s = 0; s < meshN; ++s)
     {
@@ -356,15 +413,21 @@ void KleinBottleAudioProcessor::renderVoice (int index, juce::AudioBuffer<float>
         mesh.step();
 
         const float a = mesh.read (bp.pickU, bp.pickV, velRead);
-        const float b = mesh.read (pu2, bp.pickV, velRead);
+        const float b = mesh.read (secondU, secondV, velRead);
+        float rawL = a, rawR = b;
+        if (topology == 0)      { rawL = a + 0.22f * b; rawR = b - 0.18f * a; }
+        else if (topology == 2) { rawL = 1.45f * (a - 0.90f * b); rawR = 1.45f * (b - 0.90f * a); }
+        else if (topology == 4) { rawL = 0.82f * (a + b); rawR = rawL; }
 
-        const float ya = a - v.dcAx + 0.9975f * v.dcAy;   // DC blocker (a DC mode
-        v.dcAx = a; v.dcAy = ya;                          //  survives on closed manifolds)
-        const float yb = b - v.dcBx + 0.9975f * v.dcBy;
-        v.dcBx = b; v.dcBy = yb;
+        const float ya = rawL - v.dcAx + 0.9975f * v.dcAy; // DC blocker (a DC mode
+        v.dcAx = rawL; v.dcAy = ya;                        // survives on closed manifolds)
+        const float yb = rawR - v.dcBx + 0.9975f * v.dcBy;
+        v.dcBx = rawR; v.dcBy = yb;
 
-        v.meshL[(size_t) s] = ya;
-        v.meshR[(size_t) s] = yb;
+        v.toneL += toneCoeff * (ya - v.toneL);
+        v.toneR += toneCoeff * (yb - v.toneR);
+        v.meshL[(size_t) s] = v.toneL;
+        v.meshR[(size_t) s] = v.toneR;
     }
 
     float* outL = buffer.getWritePointer (0);
@@ -390,6 +453,18 @@ void KleinBottleAudioProcessor::renderVoice (int index, juce::AudioBuffer<float>
         }
         sl *= invFold;
         sr *= invFold;
+
+        const float tonal = (float) std::sin (v.tonalPhase) * v.tonalEnv;
+        v.tonalPhase += v.tonalPhaseInc;
+        if (v.tonalPhase >= juce::MathConstants<double>::twoPi)
+            v.tonalPhase -= juce::MathConstants<double>::twoPi;
+        if (v.bowing || v.blowing)
+            v.tonalEnv += 0.002f * (v.tonalLevel - v.tonalEnv);
+        else
+            v.tonalEnv *= v.tonalDecay;
+        sl += tonal;
+        sr += tonal;
+        peak = std::max (peak, std::abs (tonal));
 
         peak = std::max (peak, std::max (std::abs (sl), std::abs (sr)));
         outL[s] += sl * v.levelComp * kVoiceMakeUp * susGain * gl;
@@ -451,16 +526,100 @@ void KleinBottleAudioProcessor::handleNoteOn (juce::MidiKeyboardState* /*source*
                                               int /*midiChannel*/,
                                               int midiNoteNumber, float velocity)
 {
-    const juce::ScopedLock sl (pendingLock);
-    pendingQueue.push_back ({ true, midiNoteNumber, velocity });
+    int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+    pendingFifo.prepareToWrite (1, start1, size1, start2, size2);
+    if (size1 > 0)
+    {
+        pendingEvents[(size_t) start1] = { true, midiNoteNumber, velocity };
+        pendingFifo.finishedWrite (1);
+    }
+}
+
+int KleinBottleAudioProcessor::getNumPrograms()
+{
+    return (int) std::size (factoryPresets);
+}
+
+const juce::String KleinBottleAudioProcessor::getProgramName (int index)
+{
+    return juce::isPositiveAndBelow (index, getNumPrograms()) ? factoryPresets[index].name : juce::String();
+}
+
+void KleinBottleAudioProcessor::setCurrentProgram (int index)
+{
+    if (! juce::isPositiveAndBelow (index, getNumPrograms()))
+        return;
+
+    const auto& p = factoryPresets[index];
+    auto set = [this] (const char* id, float value)
+    {
+        if (auto* parameter = apvts.getParameter (id))
+        {
+            parameter->beginChangeGesture();
+            parameter->setValueNotifyingHost (parameter->convertTo0to1 (value));
+            parameter->endChangeGesture();
+        }
+    };
+
+    set (param::topology, (float) p.topology); set (param::excType, (float) p.exciter);
+    set (param::pickMode, (float) p.pickupMode); set (param::quality, (float) p.quality);
+    set (param::shape, p.shape); set (param::decay, p.decay);
+    set (param::excU, p.excU); set (param::excV, p.excV); set (param::force, p.force);
+    set (param::hard, p.tone); set (param::motion, p.motion); set (param::keyTrack, p.keyTrack);
+    set (param::pickU, p.pickU); set (param::pickV, p.pickV);
+    set (param::spread, p.width); set (param::level, p.level);
+    currentProgram.store (index);
 }
 
 void KleinBottleAudioProcessor::handleNoteOff (juce::MidiKeyboardState* /*source*/,
                                                int /*midiChannel*/,
                                                int midiNoteNumber, float /*velocity*/)
 {
-    const juce::ScopedLock sl (pendingLock);
-    pendingQueue.push_back ({ false, midiNoteNumber, 0.0f });
+    int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+    pendingFifo.prepareToWrite (1, start1, size1, start2, size2);
+    if (size1 > 0)
+    {
+        pendingEvents[(size_t) start1] = { false, midiNoteNumber, 0.0f };
+        pendingFifo.finishedWrite (1);
+    }
+}
+
+void KleinBottleAudioProcessor::handleMidiMessage (const juce::MidiMessage& m,
+                                                    const BlockParams& bp)
+{
+    if (m.isNoteOn())
+        startVoice (m.getNoteNumber(), m.getFloatVelocity(), bp);
+    else if (m.isNoteOff())
+    {
+        if (sustainHeld)
+            sustainedNotes.push_back (m.getNoteNumber());
+        else
+            releaseNote (m.getNoteNumber());
+    }
+    else if (m.isController())
+    {
+        const int cc = m.getControllerNumber();
+        const int val = m.getControllerValue();
+        if (cc == 64)
+        {
+            const bool down = val >= 64;
+            if (! down && sustainHeld)
+            {
+                for (int note : sustainedNotes)
+                    releaseNote (note);
+                sustainedNotes.clear();
+            }
+            sustainHeld = down;
+        }
+        else if (cc == 1)
+            modWheelTarget = val / 127.0f;
+        else if (cc == 120 || cc == 123)
+        {
+            sustainedNotes.clear();
+            sustainHeld = false;
+            allNotesOff (true);
+        }
+    }
 }
 
 //==============================================================================
@@ -474,46 +633,15 @@ void KleinBottleAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     if (numSamples <= 0)
         return;
 
-    // ---- 1) MIDI ------------------------------------------------------------
-    for (const auto metadata : midi)
-    {
-        auto m = metadata.getMessage();
-        keyboardState.processNextMidiEvent (m);
-
-        if (m.isController())
-        {
-            const int cc  = m.getControllerNumber();
-            const int val = m.getControllerValue();
-
-            if (cc == 64)                       // sustain pedal
-            {
-                const bool down = (val >= 64);
-                if (down && ! sustainHeld)
-                {
-                    sustainHeld = true;
-                }
-                else if (! down && sustainHeld)
-                {
-                    sustainHeld = false;
-                    for (int n : sustainedNotes)
-                        releaseNote (n);
-                    sustainedNotes.clear();
-                }
-            }
-            else if (cc == 1)                   // mod wheel
-            {
-                modWheelTarget = val / 127.0f;
-            }
-            else if (cc == 120 || cc == 123)    // all notes off / reset
-            {
-                sustainedNotes.clear();
-                sustainHeld = false;
-                allNotesOff (true);
-            }
-        }
-    }
-
     const BlockParams bp = readBlockParams();
+
+    if (panicRequested.exchange (false, std::memory_order_acq_rel))
+        performPanic();
+
+    // Host MIDI arrives on the audio thread, so handle it directly. GUI notes
+    // use the fixed-capacity FIFO below and never allocate or take a lock.
+    for (const auto metadata : midi)
+        handleMidiMessage (metadata.getMessage(), bp);
 
     // ---- 1b) live topology switch ---------------------------------------------
     //  Re-identify every resonator (ringing or idle) the moment the parameter
@@ -537,26 +665,26 @@ void KleinBottleAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         startVoice ((int) bp.pitch, 0.95f, bp);
 
     // ---- 4) note events queued from the GUI keyboard ----------------------------
+    while (pendingFifo.getNumReady() > 0)
     {
-        std::vector<PendingEvent> local;
+        int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+        pendingFifo.prepareToRead (pendingFifo.getNumReady(), start1, size1, start2, size2);
+        auto consume = [this, &bp] (int start, int count)
         {
-            const juce::ScopedLock sl (pendingLock);
-            local.swap (pendingQueue);
-        }
-        for (const auto& e : local)
-        {
-            if (e.on)
+            for (int i = 0; i < count; ++i)
             {
-                startVoice (e.note, e.vel, bp);
-            }
-            else
-            {
-                if (sustainHeld)
+                const auto& e = pendingEvents[(size_t) (start + i)];
+                if (e.on)
+                    startVoice (e.note, e.vel, bp);
+                else if (sustainHeld)
                     sustainedNotes.push_back (e.note);
                 else
                     releaseNote (e.note);
             }
-        }
+        };
+        consume (start1, size1);
+        consume (start2, size2);
+        pendingFifo.finishedRead (size1 + size2);
     }
 
     // ---- 5) render voices ---------------------------------------------------------

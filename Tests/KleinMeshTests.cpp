@@ -370,6 +370,8 @@ static void testVoiceLevelSpread()
         const int meshN = nOut * spec.fold;
         std::vector<float> meshSig ((size_t) meshN);
         float dcx = 0.0f, dcy = 0.0f;
+        float toneState = 0.0f;
+        const float toneCoeff = 0.035f + 0.965f * 0.45f * 0.45f;
 
         for (int s = 0; s < meshN; ++s)
         {
@@ -377,18 +379,31 @@ static void testVoiceLevelSpread()
             const float a  = m.read (0.68f, 0.58f, true);
             const float ya = a - dcx + 0.9975f * dcy;
             dcx = a; dcy = ya;
-            meshSig[(size_t) s] = ya;
+            toneState += toneCoeff * (ya - toneState);
+            meshSig[(size_t) s] = toneState;
         }
 
         std::vector<float> out ((size_t) nOut);
         const float inv = 1.0f / (float) spec.fold;
+        double phase = 0.0;
+        const double phaseInc = 6.283185307179586 * f0 / 48000.0;
+        float tonalEnv = 0.008f;
+        const float tonalDecay = (float) std::exp (-6.90775527898 / (2.0 * 48000.0));
         for (int s = 0; s < nOut; ++s)
         {
             float acc = 0.0f;
             const int base = s * spec.fold;
             for (int k = 0; k < spec.fold; ++k)
                 acc += meshSig[(size_t) (base + k)];
-            out[(size_t) s] = acc * inv;
+            const float tonal = (float) std::sin (phase) * tonalEnv;
+            phase += phaseInc;
+            if (phase >= 6.283185307179586)
+                phase -= 6.283185307179586;
+            tonalEnv *= tonalDecay;
+
+            // Mirror the processor's neutral register gain, tuned core, voice
+            // make-up, equal-power centre pan and driven master limiter.
+            out[(size_t) s] = std::tanh ((acc * inv + tonal) * 3.18f);
         }
 
         double acc = 0.0;
@@ -396,9 +411,7 @@ static void testVoiceLevelSpread()
             acc += (double) out[(size_t) s] * out[(size_t) s];
         const double rms = std::sqrt (acc / (double) (nOut / 2));
 
-        // mirror the processor's register tilt so the test checks what is heard
-        const double compDb = std::max (-6.0, std::min (8.0, -3.5 * std::log2 (f0 / 130.81278265)));
-        level.push_back (rms * std::pow (10.0, compDb / 20.0));
+        level.push_back (rms);
     }
 
     double lo = 1.0e30, hi = 0.0;

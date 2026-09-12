@@ -4,7 +4,6 @@
     SPDX-License-Identifier: AGPL-3.0-or-later
 */
 #pragma once
-#pragma once
 
 #include "KleinMesh.h"
 
@@ -57,6 +56,9 @@ struct Voice
 
     float dcAx = 0.0f, dcAy = 0.0f;
     float dcBx = 0.0f, dcBy = 0.0f;
+    float toneL = 0.0f, toneR = 0.0f;
+    double tonalPhase = 0.0, tonalPhaseInc = 0.0;
+    float tonalEnv = 0.0f, tonalLevel = 0.0f, tonalDecay = 1.0f;
     float silenceTime = 0.0f;
 
     KleinMesh mesh;

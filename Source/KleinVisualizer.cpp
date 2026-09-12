@@ -4,7 +4,6 @@
     SPDX-License-Identifier: AGPL-3.0-or-later
 */
 #include "KleinVisualizer.h"
-#include "KleinVisualizer.h"
 
 #if __has_include("BinaryData.h")
  #include "BinaryData.h"
@@ -268,7 +267,7 @@ void KleinVisualizer::paint (juce::Graphics& g)
 
     g.setColour (juce::Colour (0xff9aa5b5));
     g.setFont (juce::Font (juce::FontOptions (16.0f)));
-    g.drawText ("v1.1", textX + titleW + 14.0f, 5.0f, 80.0f, 42.0f,
+    g.drawText ("v" JucePlugin_VersionString, textX + titleW + 14.0f, 5.0f, 80.0f, 42.0f,
                 juce::Justification::centredLeft);
 
     // ---- status line (bottom) ------------------------------------------------------

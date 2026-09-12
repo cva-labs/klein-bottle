@@ -4,8 +4,8 @@
     SPDX-License-Identifier: AGPL-3.0-or-later
 */
 #include "KleinMesh.h"
-#include "KleinMesh.h"
 
+#include <array>
 #include <cstring>
 #if defined (__AVX2__)
  #include <immintrin.h>
@@ -493,11 +493,16 @@ void KleinMesh::applyPatch (float u, float v, int radius, float amp, PatchMode m
     if (uCurr == nullptr || uPrev == nullptr)
         return;
 
-    const int   R  = std::max (1, std::min (radius, std::min (nx, ny) - 1));
+    constexpr int maxRadius = 14;
+    const int   R  = std::max (1, std::min ({ radius, std::min (nx, ny) - 1, maxRadius }));
     const int   ci = (int) std::lround (u * (float) nx);
     const int   cj = (int) std::lround (v * (float) ny);
 
-    std::vector<float> w ((size_t) (2 * R + 1) * (2 * R + 1), 0.0f);
+    // The largest supported mesh is 144x144 and the softest noise patch uses
+    // at most radius 14. Keep this scratch storage on the stack: exciters are
+    // triggered from the audio callback and must never allocate from the heap.
+    constexpr int maxWidth  = 2 * maxRadius + 1;
+    std::array<float, maxWidth * maxWidth> w {};
     float wsum = 0.0f;
     size_t idx = 0;
     for (int dj = -R; dj <= R; ++dj)

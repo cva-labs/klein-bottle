@@ -4,7 +4,6 @@
     SPDX-License-Identifier: AGPL-3.0-or-later
 */
 #include "PluginEditor.h"
-#include "PluginEditor.h"
 
 namespace kb
 {
@@ -29,36 +28,41 @@ KleinBottleAudioProcessorEditor::KleinBottleAudioProcessorEditor (KleinBottleAud
     for (auto& g : group)
         addAndMakeVisible (g);
 
-    addSlider (param::pitch,    "Note",      juce::Slider::LinearHorizontal);
-    addSlider (param::shape,    "Shape");
-    addSlider (param::decay,    "Decay");
-    addCombo  (param::topology, "Topology",  { "Klein Bottle", "Torus", "Mobius Band",
-                                               "Cylinder", "Membrane" });
-    addCombo  (param::quality,  "Quality",   { "Eco", "Standard", "High" });
+    presetLabel.setText ("PRESET", juce::dontSendNotification);
+    presetLabel.setColour (juce::Label::textColourId, juce::Colour (0xff9aa5b5));
+    presetLabel.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
+    addAndMakeVisible (presetLabel);
+    for (int i = 0; i < proc.getNumPrograms(); ++i)
+        presetBox.addItem (proc.getProgramName (i), i + 1);
+    presetBox.setSelectedItemIndex (proc.getCurrentProgram(), juce::dontSendNotification);
+    presetBox.setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xff20262f));
+    presetBox.setColour (juce::ComboBox::outlineColourId, juce::Colour (0xff4fc3f7));
+    presetBox.setColour (juce::ComboBox::textColourId, juce::Colour (0xffd5dbe4));
+    presetBox.setColour (juce::ComboBox::arrowColourId, juce::Colour (0xff4fc3f7));
+    presetBox.onChange = [this] { proc.setCurrentProgram (presetBox.getSelectedItemIndex()); };
+    addAndMakeVisible (presetBox);
 
-    addCombo  (param::excType,  "Type",      { "Mallet", "Pluck", "Noise Burst", "Bow",
+    addSlider (param::decay,    "Decay").slider.setTooltip ("Controls the acoustic decay time from a short hit to a long ring");
+    addCombo  (param::topology, "Topology",  { "Klein Bottle", "Mobius Band", "Membrane" });
+    addCombo  (param::excType,  "Exciter",   { "Mallet", "Pluck", "Noise Burst", "Bow",
                                                "Wind" });
-    addSlider (param::excU,     "Pos U");
-    addSlider (param::excV,     "Pos V");
-    addSlider (param::force,    "Force");
-    addSlider (param::hard,     "Hardness");
-    addSlider (param::motion,   "Motion");
-
-    addSlider (param::pickU,    "Pos U");
-    addSlider (param::pickV,    "Pos V");
-    addCombo  (param::pickMode, "Mode",      { "Displacement", "Velocity" });
-    addSlider (param::spread,   "Spread");
+    addSlider (param::hard,     "Tone").slider.setTooltip ("Moves from soft and dark to hard and bright");
+    addSlider (param::motion,   "Motion").slider.setTooltip ("Orbits the excitation point across the surface");
+    addSlider (param::spread,   "Width").slider.setTooltip ("Controls stereo width from mono to wide");
 
     addSlider (param::level,    "Level",     juce::Slider::LinearHorizontal);
 
+    pluckButton.setButtonText ("Trigger");
+    pluckButton.setTooltip ("Preview the selected sound");
+    panicButton.setTooltip ("Immediately stop and clear all voices");
     pluckButton.onClick = [this] { proc.triggerPluck(); };
     panicButton.onClick = [this] { proc.panic(); };
     addAndMakeVisible (pluckButton);
     addAndMakeVisible (panicButton);
 
     setResizable (true, true);
-    setResizeLimits (1242, 846, 2530, 1690);
-    setSize (1322, 925);   // +15% over the original 1150 x 805
+    setResizeLimits (900, 650, 2530, 1690);
+    setSize (1180, 820);
     startTimerHz (30);
 }
 
@@ -145,6 +149,9 @@ KleinBottleAudioProcessorEditor::findCombo (const juce::String& id)
 void KleinBottleAudioProcessorEditor::timerCallback()
 {
     visualizer.advance (1.0 / 30.0);
+    if (! presetBox.isPopupActive()
+        && presetBox.getSelectedItemIndex() != proc.getCurrentProgram())
+        presetBox.setSelectedItemIndex (proc.getCurrentProgram(), juce::dontSendNotification);
 }
 
 void KleinBottleAudioProcessorEditor::paint (juce::Graphics& g)
@@ -160,20 +167,22 @@ void KleinBottleAudioProcessorEditor::resized()
     ribbon.setBounds (area.removeFromBottom (64));
     area.removeFromBottom (6);
 
-    const int panelH = juce::jlimit (170, 236, (int) (area.getHeight() * 0.36f));
+    auto presetRow = area.removeFromTop (36);
+    presetLabel.setBounds (presetRow.removeFromLeft (72));
+    presetBox.setBounds (presetRow.removeFromLeft (260).reduced (0, 3));
+    area.removeFromTop (6);
+
+    const int panelH = juce::jlimit (150, 205, (int) (area.getHeight() * 0.31f));
     auto panelArea = area.removeFromBottom (panelH);
     area.removeFromBottom (6);
     visualizer.setBounds (area);
 
-    const int w0 = (int) ((float) panelArea.getWidth() * 0.27f);
-    const int w1 = (int) ((float) panelArea.getWidth() * 0.27f);
-    const int w2 = (int) ((float) panelArea.getWidth() * 0.24f);
-    const int w3 = panelArea.getWidth() - w0 - w1 - w2;
+    const int w0 = (int) ((float) panelArea.getWidth() * 0.40f);
+    const int w1 = (int) ((float) panelArea.getWidth() * 0.30f);
 
     group[0].setBounds (panelArea.removeFromLeft (w0));
     group[1].setBounds (panelArea.removeFromLeft (w1));
-    group[2].setBounds (panelArea.removeFromLeft (w2));
-    group[3].setBounds (panelArea);
+    group[2].setBounds (panelArea);
 
     auto fillGroup = [this] (int gi, const std::vector<std::pair<juce::String, bool>>& rows)
     {
@@ -213,15 +222,12 @@ void KleinBottleAudioProcessorEditor::resized()
         }
     };
 
-    fillGroup (0, { { param::pitch, false }, { param::shape, false }, { param::decay, false },
-                    { param::topology, true }, { param::quality, true } });
-    fillGroup (1, { { param::excType, true }, { param::excU, false }, { param::excV, false },
-                    { param::force, false }, { param::hard, false }, { param::motion, false } });
-    fillGroup (2, { { param::pickU, false }, { param::pickV, false },
-                    { param::pickMode, true }, { param::spread, false } });
+    fillGroup (0, { { param::topology, true }, { param::excType, true },
+                    { param::decay, false }, { param::hard, false } });
+    fillGroup (1, { { param::motion, false }, { param::spread, false } });
 
     {
-        auto inner = group[3].getBounds()           // absolute: controls are editor children
+        auto inner = group[2].getBounds()           // absolute: controls are editor children
                         .withTrimmedLeft (10).withTrimmedTop (22)
                         .withTrimmedRight (10).withTrimmedBottom (8);
         const int rh = inner.getHeight() / 3;

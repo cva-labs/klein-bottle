@@ -4,7 +4,6 @@
     SPDX-License-Identifier: AGPL-3.0-or-later
 */
 #pragma once
-#pragma once
 
 /*
     KleinMesh - a digital waveguide mesh living on a Klein bottle.

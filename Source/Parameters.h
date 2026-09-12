@@ -4,7 +4,6 @@
     SPDX-License-Identifier: AGPL-3.0-or-later
 */
 #pragma once
-#pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -54,7 +53,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
 
     layout.add (std::make_unique<AudioParameterChoice> (
         ParameterID { param::topology, 1 }, "Topology",
-        StringArray { "Klein Bottle", "Torus", "Mobius Band", "Cylinder", "Membrane" }, 0));
+        StringArray { "Klein Bottle", "Mobius Band", "Membrane" }, 0));
 
     layout.add (std::make_unique<AudioParameterChoice> (
         ParameterID { param::quality, 1 }, "Mesh Quality",

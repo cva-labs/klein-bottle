@@ -91,5 +91,5 @@ jobs:
           TAG="${{ github.ref_name }}"
           gh release view "$TAG" >/dev/null 2>&1 || \
             gh release create "$TAG" --title "Klein Bottle Experimental $TAG" \
-               --notes "VST3 + Standalone builds. See README for installation."
+               --generate-notes
           gh release upload "$TAG" dist/*.zip --clobber

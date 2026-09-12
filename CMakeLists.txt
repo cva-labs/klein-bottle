@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(KleinBottleSynth VERSION 1.1.0 LANGUAGES C CXX)
+project(KleinBottleSynth VERSION 2.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,7 +14,7 @@ endif()
 add_subdirectory("${JUCE_PATH}" JUCE)
 
 # --------------------------------------------------------------------------------------
-# Klein Bottle Experimental (v1.1) by CVA Labs
+# Klein Bottle Experimental (v2.0) by CVA Labs
 # --------------------------------------------------------------------------------------
 set(KLEIN_STANDALONE_ICON "${CMAKE_CURRENT_SOURCE_DIR}/klein_icon2.png")
 set(_klein_icon_args)
